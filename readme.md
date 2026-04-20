@@ -1,1 +1,91 @@
-Audit Finding Report: OwockiBot PlatformHigh Severity IssuesH-1 · Lack of Server-Side Validation on reward_usdcDescription: The API fails to validate reward amounts, allowing inconsistent data (negative integers, zeros, and extreme values) to persist in the database.Impact: Attackers can manipulate reward values, poisoning downstream analytics, leaderboard totals, and potentially causing integer overflows in integrated systems.Evidence: Records #173 through #181 show rewards of -100, 0, and 999,999,999, all currently accessible via the public API.Fix: Implement a schema validator (e.g., Zod or Pydantic) on the POST handler to enforce: $1 \leq \text{reward\_usdc} \leq 10,000$.H-2 · Bounty Creators Can Claim Their Own TasksDescription: The system does not prevent a bounty creator from acting as the claimer/submitter for their own task.Impact: This enables reputation gaming and leaderboard farming. If an escrow system is implemented, this would allow creators to "self-drain" funds to bypass platform logic.Evidence: Bounties #288 and #193 show that creator_address matches claimer_address.Fix: Update the PATCH {action: 'claim'} handler to reject requests where the claimer's address equals the bounty creator's address.Medium Severity IssuesM-1 · Empty creator_address Accepted in DatabaseDescription: The application allows bounties to be created with an empty string for the creator_address.Impact: This breaks the authorization model. Since "completing" a bounty requires matching the creator's address, anyone sending an empty string can hijack and complete these orphaned records.Evidence: Bounties #221–#223 have empty addresses but are marked as "completed."Fix: Add regex validation ($^0x[0-9a-fA-F]{40}$) on creation and enforce a NOT NULL constraint at the DB level.M-2 · Systematic Timestamp Format DivergenceDescription: created_at and updated_at use different ISO-8601 variations due to different tech stacks (Postgres/Python vs. Node.js).Impact: Strict data parsers may fail; sorting and comparing the two fields becomes error-prone and inconsistent.Evidence: created_at uses microsecond precision (+00:00) while updated_at uses millisecond precision (Z).Fix: Standardize timestamp generation in a single layer (e.g., using DB-level now() for both fields).M-3 · State-Machine Regression: Invalid "Claimed" StatusDescription: Bounties exist in a "claimed" state despite already having a submission_url populated.Impact: This indicates a breakdown in the business logic flow. A bounty with a submission should be in a "submitted" or "completed" state.Evidence: Bounty #244 is marked "claimed" but contains a valid GitHub submission link.Fix: Wrap status transitions and submission writes in an atomic transaction; add a DB CHECK constraint: status <> 'claimed' OR submission_url IS NULL.Low Severity / Hygiene IssuesL-1 · Missing Sanitization and Length Limits on TitlesDescription: The server accepts raw HTML tags and arbitrarily long strings in the title and description fields.Impact: Risk of "Passive XSS" for third-party consumers (bots, RSS feeds) and potential UI breakage from excessively long text.Fix: Strip HTML tags on the server side and enforce character limits (e.g., 120 for titles).L-2 · Production Database PollutionDescription: Developer test records (e.g., "negative test", "huge bounty") are indexed in the production API.Impact: Diminishes professional credibility and skews platform metrics.Fix: Hard-delete test artifacts and ensure strict separation between staging and production environments.
+# Security Audit Report: OwockiBot Platform
+
+## 🔴 High Severity
+
+### H-1 · Lack of Server-Side Validation on `reward_usdc`
+**Description:** The API lacks proper validation for reward amounts, allowing inconsistent and invalid data (negative values, zeros, and extreme integers) to persist in the database.
+
+**Evidence (Live in DB):**
+- **Bounty #173:** `reward_usdc` = -100 ("negative test")
+- **Bounty #174:** `reward_usdc` = 0 ("zero test")
+- **Bounty #180:** `reward_usdc` = 999,999,999 ("huge bounty")
+
+**Impact:** Attackers can manipulate reward values, poisoning downstream analytics and causing potential overflows in leaderboards or financial dashboards.
+
+**Recommended Fix:** Implement a schema validator (Zod/Pydantic) on the `POST` handler to enforce:
+`reward_usdc: int, min=1, max=10000`.
+
+---
+
+### H-2 · Bounty Creator Self-Claim Vulnerability
+**Description:** The system allows bounty creators to claim and complete their own tasks, bypassing the intended collaborative nature of the platform.
+
+**Evidence:**
+- **Bounty #288:** `creator_address` == `claimer_address` (0xdc05f6ca...)
+- **Bounty #193:** `creator_address` == `claimer_address` (0xC7Da3DbC...)
+
+**Impact:** Enables reputation gaming and leaderboard farming. If escrow is implemented, this allows creators to "self-drain" funds.
+
+**Recommended Fix:** Update the `PATCH {action:'claim'}` handler to reject requests if:
+`claimer.toLowerCase() === bounty.creator_address.toLowerCase()`.
+
+---
+
+## 🟡 Medium Severity
+
+### M-1 · Null/Empty `creator_address` Persistence
+**Description:** The database accepts an empty string for the `creator_address` field upon bounty creation.
+
+**Evidence:** Bounties #221, #222, and #223 all have `creator_address: ""`.
+
+**Impact:** Breaks the authorization model. Anyone can claim or cancel these bounties by sending an empty string as the authority.
+
+**Recommended Fix:** Add Regex validation (`^0x[0-9a-fA-F]{40}$`) on creation and apply a `NOT NULL` constraint at the DB level.
+
+---
+
+### M-2 · Systematic Timestamp Format Divergence
+**Description:** `created_at` and `updated_at` use different ISO-8601 formats due to inconsistent generation layers (Postgres/Python vs. Node.js).
+
+**Evidence:** - `created_at`: `2026-04-11T14:04:44.764727+00:00` (Microseconds)
+- `updated_at`: `2026-04-11T14:05:40.622Z` (Milliseconds)
+
+**Impact:** Strict parsers and sorting algorithms may fail or produce inconsistent results.
+
+**Recommended Fix:** Standardize timestamp generation in a single layer (e.g., DB-level `now()` on both insert and update).
+
+---
+
+### M-3 · State-Machine Inconsistency (`claimed` + `submission_url`)
+**Description:** Bounties are found in a `claimed` state while already possessing a `submission_url`.
+
+**Evidence:** Bounty #244: `status: "claimed"` with a valid GitHub submission link.
+
+**Impact:** Indicates a broken business logic flow where status transitions do not follow the data lifecycle.
+
+**Recommended Fix:** Ensure status updates and submission writes are atomic. Add a DB constraint: 
+`CHECK (status <> 'claimed' OR submission_url IS NULL)`.
+
+---
+
+## 🔵 Low Severity & Hygiene
+
+### L-1 · Missing Sanitization on Title/Description
+**Description:** The server accepts raw HTML tags and lacks length limits for bounty metadata.
+
+**Evidence:** Bounty #172 title: `<script>alert(1)</script>`.
+
+**Impact:** Potential Passive XSS for third-party consumers (bots, RSS feeds, indexers).
+
+**Recommended Fix:** Sanitize HTML tags server-side and enforce limits (Title ≤ 120, Description ≤ 3000).
+
+---
+
+### L-2 · Production Database Pollution
+**Description:** Test records from developers are visible in the public production API.
+
+**Evidence:** Bounties #173, #174, #180, and #181 (e.g., "negative test", "string reward").
+
+**Impact:** Reduces data integrity and professional credibility.
+
+**Recommended Fix:** Hard-delete test artifacts and establish a strict staging vs. production environment separation.
